@@ -4,7 +4,6 @@
 [![Spring Boot 3.3](https://img.shields.io/badge/Spring%20Boot-3.3.2-brightgreen.svg)](https://spring.io/projects/spring-boot)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
 [![Redis Redisson](https://img.shields.io/badge/Redis-Redisson-red.svg)](https://redisson.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A **portfolio-grade, interview-ready Java backend system** designed to solve high-concurrency seat reservation and flash sale problems (BookMyShow / IRCTC / Ticketmaster style).
 
@@ -355,8 +354,3 @@ Ticket-Booking-System
 * 🧠 [Concurrency Deep Dive](docs/concurrency.md)
 * 📊 [Benchmark Report](docs/concurrency-benchmark.md)
 * 🗄️ [Database Design & Transaction Isolation](docs/database-design.md)
-
----
-
-## 📄 License
-This project is open-source under the MIT License.
