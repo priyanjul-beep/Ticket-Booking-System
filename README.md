@@ -195,8 +195,4 @@ mvn test -Dtest=ConcurrencyTest
   - `POST /api/flash-sales` - Create flash sale
   - `POST /api/flash-sales/{id}/purchase` - Purchase flash sale ticket
 
----
 
-## 12. License
-
-This project is licensed under the MIT License.
