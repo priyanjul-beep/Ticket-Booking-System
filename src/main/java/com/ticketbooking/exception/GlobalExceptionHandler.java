@@ -30,8 +30,8 @@ public class GlobalExceptionHandler {
         return buildErrorResponse(HttpStatus.CONFLICT, "LOCK_TIMEOUT", ex.getMessage(), request);
     }
 
-    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
-    public ResponseEntity<ErrorResponse> handleOptimisticLocking(ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
+    @ExceptionHandler({ObjectOptimisticLockingFailureException.class, jakarta.persistence.OptimisticLockException.class})
+    public ResponseEntity<ErrorResponse> handleOptimisticLocking(Exception ex, HttpServletRequest request) {
         return buildErrorResponse(HttpStatus.CONFLICT, "OPTIMISTIC_LOCK_CONFLICT",
             "The seat was updated by another concurrent user. Please try again.", request);
     }

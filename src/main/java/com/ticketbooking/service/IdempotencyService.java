@@ -33,16 +33,15 @@ public class IdempotencyService {
 
     public Optional<IdempotencyRecord> getRecord(String idempotencyKey) {
         String redisKey = REDIS_PREFIX + idempotencyKey;
-        String cachedJson = redisTemplate.opsForValue().get(redisKey);
-
-        if (cachedJson != null) {
-            try {
+        try {
+            String cachedJson = redisTemplate.opsForValue().get(redisKey);
+            if (cachedJson != null) {
                 IdempotencyRecord record = objectMapper.readValue(cachedJson, IdempotencyRecord.class);
                 log.info("IDEMPOTENCY_CACHE_HIT in Redis for key: {}", idempotencyKey);
                 return Optional.of(record);
-            } catch (Exception e) {
-                log.warn("Failed to parse Redis idempotency cache for key: {}", idempotencyKey, e);
             }
+        } catch (Exception e) {
+            log.warn("Redis unavailable for idempotency lookup, falling back to DB: {}", e.getMessage());
         }
 
         // DB fallback

@@ -18,7 +18,7 @@ public class LockStrategyFactory {
             type = LockStrategyType.REDIS;
         }
 
-        if (type == LockStrategyType.PESSIMISTIC || type == LockStrategyType.OPTIMISTIC) {
+        if (type == LockStrategyType.PESSIMISTIC || type == LockStrategyType.OPTIMISTIC || type == LockStrategyType.NO_LOCK) {
             return noOpSeatLockStrategy;
         }
 

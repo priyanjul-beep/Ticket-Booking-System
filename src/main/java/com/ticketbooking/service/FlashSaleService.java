@@ -40,6 +40,7 @@ public class FlashSaleService {
     private final EventRepository eventRepository;
     private final UserRepository userRepository;
     private final StringRedisTemplate redisTemplate;
+    private final FlashSaleTransactionDelegate transactionDelegate;
 
     private static final String REDIS_COUNTER_PREFIX = "flashsale:counter:";
 
@@ -64,8 +65,12 @@ public class FlashSaleService {
 
         // Initialize Redis counter atomically
         String counterKey = REDIS_COUNTER_PREFIX + saved.getId();
-        redisTemplate.opsForValue().set(counterKey, String.valueOf(saved.getTotalTickets()));
-        log.info("FLASH_SALE_CREATED: ID {}, Initialized Redis counter {} to {}", saved.getId(), counterKey, saved.getTotalTickets());
+        try {
+            redisTemplate.opsForValue().set(counterKey, String.valueOf(saved.getTotalTickets()));
+            log.info("FLASH_SALE_CREATED: ID {}, Initialized Redis counter {} to {}", saved.getId(), counterKey, saved.getTotalTickets());
+        } catch (Exception e) {
+            log.warn("Redis unavailable during flash sale creation, DB will serve as primary: {}", e.getMessage());
+        }
 
         return mapToDTO(saved);
     }
@@ -73,56 +78,32 @@ public class FlashSaleService {
     public FlashSalePurchaseDTO purchaseTicket(Long flashSaleId, PurchaseFlashSaleRequest request) {
         String counterKey = REDIS_COUNTER_PREFIX + flashSaleId;
 
-        // Step 1: Redis Atomic DECR
-        Long remaining = redisTemplate.opsForValue().decrement(counterKey, request.getQuantity());
-        if (remaining == null || remaining < 0) {
-            // Revert Redis counter if we went below zero
-            redisTemplate.opsForValue().increment(counterKey, request.getQuantity());
-            log.warn("FLASH_SALE_SOLD_OUT: Sale ID {}", flashSaleId);
-            throw new FlashSaleSoldOutException("Flash sale is sold out or inactive!");
+        // Step 1: Redis Atomic DECR (with DB fallback if Redis is offline)
+        try {
+            Long remaining = redisTemplate.opsForValue().decrement(counterKey, request.getQuantity());
+            if (remaining != null && remaining < 0) {
+                // Revert Redis counter if we went below zero
+                redisTemplate.opsForValue().increment(counterKey, request.getQuantity());
+                log.warn("FLASH_SALE_SOLD_OUT: Sale ID {}", flashSaleId);
+                throw new FlashSaleSoldOutException("Flash sale is sold out or inactive!");
+            }
+        } catch (FlashSaleSoldOutException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("Redis counter bypass due to Redis error, proceeding directly to DB check: {}", e.getMessage());
         }
 
-        // Step 2: Proceed to DB persistence
+        // Step 2: Proceed to DB persistence via Transactional Delegate
         try {
-            return processPurchaseInDB(flashSaleId, request);
+            return transactionDelegate.processPurchaseInDB(flashSaleId, request);
         } catch (Exception e) {
-            // Rollback Redis counter on DB error
-            redisTemplate.opsForValue().increment(counterKey, request.getQuantity());
+            // Rollback Redis counter on DB error if Redis is active
+            try {
+                redisTemplate.opsForValue().increment(counterKey, request.getQuantity());
+            } catch (Exception ignored) {}
             log.error("FLASH_SALE_DB_ERROR: Reverted Redis counter for sale {}", flashSaleId, e);
             throw e;
         }
-    }
-
-    @Transactional
-    public FlashSalePurchaseDTO processPurchaseInDB(Long flashSaleId, PurchaseFlashSaleRequest request) {
-        FlashSale sale = flashSaleRepository.findById(flashSaleId)
-                .orElseThrow(() -> new ResourceNotFoundException("Flash sale not found: " + flashSaleId));
-
-        if (!sale.getActive() || ZonedDateTime.now().isBefore(sale.getStartsAt()) || ZonedDateTime.now().isAfter(sale.getEndsAt())) {
-            throw new IllegalStateException("Flash sale is not currently active");
-        }
-
-        User user = userRepository.findById(request.getUserId())
-                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + request.getUserId()));
-
-        // Atomic DB check & increment
-        int updated = flashSaleRepository.incrementSoldTickets(flashSaleId);
-        if (updated == 0) {
-            throw new FlashSaleSoldOutException("Flash sale sold out in database check!");
-        }
-
-        FlashSalePurchase purchase = FlashSalePurchase.builder()
-                .flashSale(sale)
-                .user(user)
-                .quantity(request.getQuantity())
-                .purchaseRef(BookingReferenceGenerator.generateFlashPurchaseReference())
-                .status("COMPLETED")
-                .build();
-
-        FlashSalePurchase saved = purchaseRepository.save(purchase);
-        log.info("FLASH_SALE_PURCHASE_SUCCESS: Ref {}, Sale ID {}, User ID {}", saved.getPurchaseRef(), flashSaleId, user.getId());
-
-        return mapPurchaseToDTO(saved);
     }
 
     @Transactional(readOnly = true)

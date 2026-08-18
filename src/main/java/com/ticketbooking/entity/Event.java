@@ -48,5 +48,8 @@ public class Event {
     @PrePersist
     void prePersist() {
         this.createdAt = ZonedDateTime.now();
+        if (this.eventDate == null) {
+            this.eventDate = ZonedDateTime.now().plusDays(7);
+        }
     }
 }

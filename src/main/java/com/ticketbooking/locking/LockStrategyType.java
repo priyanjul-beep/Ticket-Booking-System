@@ -9,6 +9,7 @@ package com.ticketbooking.locking;
  *   REDIS       — Redisson distributed lock (multi-JVM)
  */
 public enum LockStrategyType {
+    NO_LOCK,
     IN_MEMORY,
     PESSIMISTIC,
     OPTIMISTIC,

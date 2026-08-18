@@ -45,6 +45,7 @@ public class BookingService {
     private final PaymentService paymentService;
     private final BookingMetricsService metricsService;
     private final AppConfig appConfig;
+    private final BookingTransactionDelegate transactionDelegate;
 
     /**
      * Create a booking with idempotency check and explicit locking strategy.
@@ -69,9 +70,9 @@ public class BookingService {
         BookingDTO result;
 
         switch (strategyType) {
-            case IN_MEMORY, REDIS -> result = createBookingWithDistributedOrInMemoryLock(request, strategyType);
-            case PESSIMISTIC -> result = createBookingWithPessimisticLock(request);
-            case OPTIMISTIC -> result = createBookingWithOptimisticLock(request);
+            case IN_MEMORY, REDIS, NO_LOCK -> result = createBookingWithDistributedOrInMemoryLock(request, strategyType);
+            case PESSIMISTIC -> result = transactionDelegate.createBookingWithPessimisticLock(request);
+            case OPTIMISTIC -> result = transactionDelegate.executeBookingTransaction(request);
             default -> throw new IllegalArgumentException("Unsupported strategy: " + strategyType);
         }
 
@@ -85,7 +86,7 @@ public class BookingService {
     }
 
     /**
-     * Strategy 1 & 4: In-Memory (ReentrantLock) or Redis (Redisson RLock).
+     * Strategy 1 & 4 & 0: In-Memory (ReentrantLock), Redis (Redisson RLock), or No-Op (Unsafe).
      *
      * FLOW:
      *   Acquire Lock -> Start DB Transaction -> Reserve Seats -> Create Pending Booking -> Commit -> Release Lock
@@ -107,7 +108,7 @@ public class BookingService {
                     TimeUnit.SECONDS
             );
 
-            if (acquiredLocks.isEmpty()) {
+            if (acquiredLocks.isEmpty() && strategyType != LockStrategyType.NO_LOCK) {
                 metricsService.recordLockFailed();
                 metricsService.recordBookingFailure();
                 throw new LockAcquisitionException("Could not acquire lock for requested seats. Please try again.");
@@ -115,8 +116,8 @@ public class BookingService {
 
             metricsService.recordLockAcquired();
 
-            // Execute DB transaction while locks are held
-            return executeBookingTransaction(request);
+            // Execute DB transaction via Spring transaction delegate while locks are held
+            return transactionDelegate.executeBookingTransaction(request);
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -132,142 +133,16 @@ public class BookingService {
 
     /**
      * Strategy 2: Database Pessimistic Locking (SELECT ... FOR UPDATE).
-     *
-     * Lock acquisition is deferred directly to PostgreSQL row locks inside the transaction.
      */
-    @Transactional
     public BookingDTO createBookingWithPessimisticLock(CreateBookingRequest request) {
-        log.info("PESSIMISTIC_LOCK_BOOKING_START for seats: {}", request.getSeatIds());
-
-        User user = userRepository.findById(request.getUserId())
-                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + request.getUserId()));
-        Event event = eventRepository.findById(request.getEventId())
-                .orElseThrow(() -> new ResourceNotFoundException("Event not found: " + request.getEventId()));
-
-        // SORT IDs to prevent deadlocks:
-        // Request 1 [1, 2], Request 2 [2, 1] -> both execute SELECT FOR UPDATE in order 1, 2
-        List<Long> sortedSeatIds = new ArrayList<>(request.getSeatIds());
-        Collections.sort(sortedSeatIds);
-
-        // Fetch rows WITH PESSIMISTIC WRITE LOCK (SELECT FOR UPDATE)
-        List<Seat> seats = seatRepository.findAllByIdWithPessimisticLock(sortedSeatIds);
-
-        if (seats.size() != sortedSeatIds.size()) {
-            throw new ResourceNotFoundException("One or more seats not found");
-        }
-
-        for (Seat seat : seats) {
-            if (seat.getStatus() != SeatStatus.AVAILABLE) {
-                metricsService.recordBookingFailure();
-                throw new SeatUnavailableException("Seat " + seat.getSeatNumber() + " is no longer available");
-            }
-        }
-
-        // Lock seats
-        BigDecimal totalAmount = BigDecimal.ZERO;
-        for (Seat seat : seats) {
-            seat.setStatus(SeatStatus.LOCKED);
-            totalAmount = totalAmount.add(seat.getPrice());
-        }
-        seatRepository.saveAll(seats);
-
-        // Decrement event available seats safely
-        int updated = eventRepository.decrementAvailableSeats(event.getId(), seats.size());
-        if (updated == 0) {
-            throw new SeatUnavailableException("Not enough available seats in event");
-        }
-
-        // Create booking
-        Booking booking = Booking.builder()
-                .bookingReference(BookingReferenceGenerator.generateBookingReference())
-                .user(user)
-                .event(event)
-                .status(BookingStatus.PENDING)
-                .totalAmount(totalAmount)
-                .idempotencyKey(request.getIdempotencyKey())
-                .expiresAt(ZonedDateTime.now().plusMinutes(appConfig.getBookingExpiryMinutes()))
-                .build();
-
-        Booking savedBooking = bookingRepository.save(booking);
-
-        for (Seat seat : seats) {
-            BookingSeat bs = BookingSeat.builder()
-                    .booking(savedBooking)
-                    .seat(seat)
-                    .build();
-            bookingSeatRepository.save(bs);
-        }
-
-        return mapToDTO(savedBooking, seats);
+        return transactionDelegate.createBookingWithPessimisticLock(request);
     }
 
     /**
      * Strategy 3: Optimistic Locking via JPA @Version.
-     *
-     * Does not block on read. Hibernate validates version column on UPDATE.
-     * Throws OptimisticLockException if version has changed.
      */
-    @Transactional
     public BookingDTO createBookingWithOptimisticLock(CreateBookingRequest request) {
-        log.info("OPTIMISTIC_LOCK_BOOKING_START for seats: {}", request.getSeatIds());
-        return executeBookingTransaction(request);
-    }
-
-    /**
-     * Helper to execute seat reservation transaction.
-     */
-    @Transactional
-    public BookingDTO executeBookingTransaction(CreateBookingRequest request) {
-        User user = userRepository.findById(request.getUserId())
-                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + request.getUserId()));
-        Event event = eventRepository.findById(request.getEventId())
-                .orElseThrow(() -> new ResourceNotFoundException("Event not found: " + request.getEventId()));
-
-        List<Seat> seats = seatRepository.findAllByIds(request.getSeatIds());
-        if (seats.size() != request.getSeatIds().size()) {
-            throw new ResourceNotFoundException("One or more seats not found");
-        }
-
-        for (Seat seat : seats) {
-            if (seat.getStatus() != SeatStatus.AVAILABLE) {
-                metricsService.recordBookingFailure();
-                throw new SeatUnavailableException("Seat " + seat.getSeatNumber() + " is already " + seat.getStatus());
-            }
-        }
-
-        BigDecimal totalAmount = BigDecimal.ZERO;
-        for (Seat seat : seats) {
-            seat.setStatus(SeatStatus.LOCKED);
-            totalAmount = totalAmount.add(seat.getPrice());
-        }
-        seatRepository.saveAll(seats); // JPA @Version incremented here for Optimistic Locking
-
-        int updated = eventRepository.decrementAvailableSeats(event.getId(), seats.size());
-        if (updated == 0) {
-            throw new SeatUnavailableException("Not enough available seats in event");
-        }
-
-        Booking booking = Booking.builder()
-                .bookingReference(BookingReferenceGenerator.generateBookingReference())
-                .user(user)
-                .event(event)
-                .status(BookingStatus.PENDING)
-                .totalAmount(totalAmount)
-                .idempotencyKey(request.getIdempotencyKey())
-                .expiresAt(ZonedDateTime.now().plusMinutes(appConfig.getBookingExpiryMinutes()))
-                .build();
-
-        Booking savedBooking = bookingRepository.save(booking);
-
-        for (Seat seat : seats) {
-            BookingSeat bs = BookingSeat.builder()
-                    .booking(savedBooking)
-                    .seat(seat)
-                    .build();
-            bookingSeatRepository.save(bs);
-        }
-
-        return mapToDTO(savedBooking, seats);
+        return transactionDelegate.executeBookingTransaction(request);
     }
 
     /**

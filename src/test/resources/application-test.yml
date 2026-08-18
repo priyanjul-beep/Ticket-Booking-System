@@ -1,0 +1,35 @@
+spring:
+  application:
+    name: ticket-booking-system-test
+
+  datasource:
+    url: jdbc:h2:mem:ticketbooking;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+    hikari:
+      maximum-pool-size: 20
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false
+    database-platform: org.hibernate.dialect.H2Dialect
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+app:
+  booking:
+    expiry-minutes: 5
+  lock:
+    wait-seconds: 3
+    lease-seconds: 5
